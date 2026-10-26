@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Proton Birthday Calendar Adapter</title>
+<style>
+  :root { color-scheme: light dark; --accent: #6d4aff; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { color: var(--accent); }
+  #drop { display: block; border: 3px dashed #999; border-radius: 1rem; padding: 3rem 1rem; text-align: center; cursor: pointer; }
+  #drop.over { border-color: var(--accent); background: rgba(109, 74, 255, 0.1); }
+  #drop input { display: none; }
+  .button { display: inline-block; background: var(--accent); color: #fff; padding: 0.6rem 1.2rem; border-radius: 0.5rem; text-decoration: none; font-weight: bold; }
+  .error { color: #c00; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+  th, td { border-bottom: 1px solid #8884; padding: 0.3rem 0.5rem; text-align: left; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<h1>Proton Birthday Calendar Adapter</h1>
+<p>Turn the birthdays in your contacts into a calendar file you can import into <a href="https://calendar.proton.me/">Proton Calendar</a>. Everything happens in your browser &mdash; your contacts are never uploaded anywhere.</p>
+
+<ol>
+  <li>Export your contacts as CSV:
+    <ul>
+      <li><strong>Google:</strong> open <a href="https://contacts.google.com/">Google Contacts</a> &rarr; Export &rarr; <em>Google CSV</em></li>
+      <li><strong>Outlook:</strong> open <a href="https://outlook.live.com/people/">Outlook People</a> &rarr; Manage contacts &rarr; Export contacts (<a href="https://support.microsoft.com/office/export-contacts-from-outlook-10f09abd-643c-4495-bb80-543714eca73f">help</a>)</li>
+    </ul>
+  </li>
+  <li>Drop the CSV file below (or click to choose it).</li>
+  <li>Download the calendar file and import it in Proton Calendar &rarr; Settings &rarr; Import.</li>
+</ol>
+
+<label id="drop">
+  <input type="file" id="file" accept=".csv,text/csv">
+  <strong>Drag &amp; drop your contacts CSV here</strong><br>or click to select a file
+</label>
+
+<p id="error" class="error" hidden></p>
+
+<section id="result" hidden>
+  <p id="summary"></p>
+  <p><a id="download" class="button" download="birthdays.ics">Download birthdays.ics</a></p>
+  <table>
+    <thead><tr><th>Event</th><th>Date</th><th>Note</th></tr></thead>
+    <tbody id="preview"></tbody>
+  </table>
+  <div id="skipped-wrap" hidden>
+    <p>These birthdays could not be understood and were skipped:</p>
+    <ul id="skipped"></ul>
+  </div>
+</section>
+
+<script>
+"use strict";
+
+var MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+var MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+var DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+// RFC 4180 CSV parser (handles quotes, escaped quotes, newlines inside fields)
+function parseCSV(text) {
+  var rows = [], row = [], field = "", inQuotes = false, i = 0, c;
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  for (; i < text.length; i++) {
+    c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
+      } else {
+        field += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ",") {
+      row.push(field); field = "";
+    } else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(field); field = "";
+      rows.push(row); row = [];
+    } else {
+      field += c;
+    }
+  }
+  if (field !== "" || row.length) { row.push(field); rows.push(row); }
+  return rows.filter(function (r) { return r.some(function (f) { return f.trim() !== ""; }); });
+}
+
+function monthFromName(name) {
+  var idx = MONTHS.indexOf(name.slice(0, 3).toLowerCase());
+  return idx < 0 ? null : idx + 1;
+}
+
+function makeDate(year, month, day) {
+  month = Number(month); day = Number(day);
+  year = year === null || year === undefined || year === "" ? null : Number(year);
+  if (!(month >= 1 && month <= 12) || !(day >= 1 && day <= DAYS_IN_MONTH[month - 1])) return null;
+  if (year !== null && (year < 1 || year > 9999)) year = null;
+  return { year: year, month: month, day: day };
+}
+
+function expandYear(y) {
+  if (y.length !== 2) return y;
+  var n = Number(y), current = new Date().getFullYear() % 100;
+  return String(n > current ? 1900 + n : 2000 + n);
+}
+
+// Returns {year|null, month, day} or null if not understood
+function parseBirthday(raw) {
+  var s = String(raw || "").trim(), m;
+  if (!s) return null;
+  // 1934-01-26, 1934/01/26, 1934.01.26
+  if ((m = s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})/))) return makeDate(m[1], m[2], m[3]);
+  // 19340126
+  if ((m = s.match(/^(\d{4})(\d{2})(\d{2})$/))) return makeDate(m[1], m[2], m[3]);
+  // --03-17, --0317 (no year)
+  if ((m = s.match(/^--(\d{1,2})-?(\d{2})$/))) return makeDate(null, m[1], m[2]);
+  // Outlook: 1/26/1934, 1/26/34, 1/26 (month/day/year); 0/0/00 means empty
+  if ((m = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?(?!\d)/))) {
+    return makeDate(m[3] ? expandYear(m[3]) : null, m[1], m[2]);
+  }
+  // European: 26.01.1934, 26.01.
+  if ((m = s.match(/^(\d{1,2})\.(\d{1,2})\.?(\d{4})?(?!\d)/))) return makeDate(m[3] || null, m[2], m[1]);
+  // Month names: FEB 29!, February 29, 1990, 29 Feb 1990, Feb-29-1990
+  var words = s.replace(/[^A-Za-z0-9]+/g, " ").trim().split(" ");
+  var month = null, numbers = [];
+  words.forEach(function (w) {
+    if (/^\d+$/.test(w)) numbers.push(w);
+    else if (month === null && w.length >= 3) month = monthFromName(w);
+  });
+  if (month !== null && numbers.length) {
+    var day = null, year = null;
+    numbers.forEach(function (n) {
+      if (n.length === 4 && year === null) year = n;
+      else if (n.length <= 2 && day === null) day = n;
+    });
+    if (day !== null) return makeDate(year, month, day);
+  }
+  return null;
+}
+
+function findColumn(headers, candidates) {
+  var lower = headers.map(function (h) { return h.trim().toLowerCase(); });
+  for (var i = 0; i < candidates.length; i++) {
+    var idx = lower.indexOf(candidates[i]);
+    if (idx >= 0) return idx;
+  }
+  return -1;
+}
+
+// Returns {entries: [{name, date, raw}], skipped: [{name, raw}]}
+function extractBirthdays(text) {
+  var rows = parseCSV(text);
+  if (rows.length < 2) throw new Error("The file does not contain any contacts.");
+  var headers = rows[0];
+  var col = {
+    birthday: findColumn(headers, ["birthday", "birth date", "birthdate", "date of birth"]),
+    first: findColumn(headers, ["first name", "given name"]),
+    last: findColumn(headers, ["last name", "family name", "surname"]),
+    full: findColumn(headers, ["name", "display name", "full name", "file as", "nickname"]),
+    org: findColumn(headers, ["organization name", "organization 1 - name", "company"])
+  };
+  if (col.birthday < 0) {
+    throw new Error("No \"Birthday\" column found. Please export a Google CSV or Outlook CSV file.");
+  }
+  var entries = [], skipped = [];
+  rows.slice(1).forEach(function (r) {
+    function get(i) { return i >= 0 && r[i] ? r[i].trim() : ""; }
+    var raw = get(col.birthday);
+    if (!raw || /^0?0\/0?0\/(00|0000)$/.test(raw)) return;
+    var name = [get(col.first), get(col.last)].filter(Boolean).join(" ") || get(col.full) || get(col.org) || "Unknown";
+    var date = parseBirthday(raw);
+    if (date) entries.push({ name: name, date: date, raw: raw });
+    else skipped.push({ name: name, raw: raw });
+  });
+  entries.sort(function (a, b) {
+    return a.date.month - b.date.month || a.date.day - b.date.day || a.name.localeCompare(b.name);
+  });
+  return { entries: entries, skipped: skipped };
+}
+
+function pad(n, len) { return String(n).padStart(len || 2, "0"); }
+
+function escapeICS(s) {
+  return String(s).replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+}
+
+// Fold lines longer than 75 octets (RFC 5545 section 3.1)
+function foldLine(line) {
+  var bytes = new TextEncoder().encode(line);
+  if (bytes.length <= 75) return line;
+  var out = [], current = "", currentLen = 0, limit = 75;
+  for (var ch of line) {
+    var len = new TextEncoder().encode(ch).length;
+    if (currentLen + len > limit) {
+      out.push(current); current = ""; currentLen = 0; limit = 74;
+    }
+    current += ch; currentLen += len;
+  }
+  out.push(current);
+  return out.join("\r\n ");
+}
+
+function hash(s) {
+  var h = 5381;
+  for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(16);
+}
+
+function buildEvent(entry, stamp) {
+  var d = entry.date, month = d.month, day = d.day;
+  var notes = [];
+  if (month === 2 && day === 29) {
+    day = 28;
+    notes.push("Birthday is actually on February 29.");
+  }
+  if (d.year !== null) notes.push("Born " + MONTH_NAMES[d.month - 1] + " " + d.day + ", " + d.year + ".");
+  // Start no earlier than 1970 for compatibility with calendar apps
+  var year = d.year !== null && d.year > 1970 ? d.year : 1970;
+  var start = new Date(Date.UTC(year, month - 1, day));
+  var end = new Date(start.getTime() + 86400000);
+  function fmt(dt) { return pad(dt.getUTCFullYear(), 4) + pad(dt.getUTCMonth() + 1) + pad(dt.getUTCDate()); }
+  var lines = [
+    "BEGIN:VEVENT",
+    "UID:birthday-" + hash(entry.name + "|" + d.year + "-" + d.month + "-" + d.day) + "@proton-birthday-calendar-adapter",
+    "DTSTAMP:" + stamp,
+    "DTSTART;VALUE=DATE:" + fmt(start),
+    "DTEND;VALUE=DATE:" + fmt(end),
+    "RRULE:FREQ=YEARLY",
+    "SUMMARY:" + escapeICS(entry.name + " birthday"),
+    "TRANSP:TRANSPARENT"
+  ];
+  if (notes.length) lines.push("DESCRIPTION:" + escapeICS(notes.join("\n")));
+  lines.push("END:VEVENT");
+  return { lines: lines, note: notes.join(" "), shown: MONTH_NAMES[month - 1] + " " + day };
+}
+
+function buildICS(entries) {
+  var now = new Date();
+  var stamp = pad(now.getUTCFullYear(), 4) + pad(now.getUTCMonth() + 1) + pad(now.getUTCDate()) + "T" +
+    pad(now.getUTCHours()) + pad(now.getUTCMinutes()) + pad(now.getUTCSeconds()) + "Z";
+  var lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//proton-birthday-calendar-adapter//EN",
+    "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH",
+    "X-WR-CALNAME:Birthdays"
+  ];
+  entries.forEach(function (e) { lines = lines.concat(buildEvent(e, stamp).lines); });
+  lines.push("END:VCALENDAR");
+  return lines.map(foldLine).join("\r\n") + "\r\n";
+}
+
+function decodeFile(buffer) {
+  var b = new Uint8Array(buffer);
+  if (b[0] === 0xFF && b[1] === 0xFE) return new TextDecoder("utf-16le").decode(b);
+  if (b[0] === 0xFE && b[1] === 0xFF) return new TextDecoder("utf-16be").decode(b);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(b);
+  } catch (e) {
+    return new TextDecoder("windows-1252").decode(b);
+  }
+}
+
+if (typeof document !== "undefined") {
+  (function () {
+    var drop = document.getElementById("drop");
+    var input = document.getElementById("file");
+    var errorEl = document.getElementById("error");
+    var result = document.getElementById("result");
+    var downloadUrl = null;
+
+    function showError(msg) {
+      errorEl.textContent = msg;
+      errorEl.hidden = false;
+      result.hidden = true;
+    }
+
+    function handleFile(file) {
+      if (!file) return;
+      errorEl.hidden = true;
+      file.arrayBuffer().then(function (buffer) {
+        var data = extractBirthdays(decodeFile(buffer));
+        if (!data.entries.length) throw new Error("No birthdays were found in this file.");
+        var ics = buildICS(data.entries);
+        if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+        downloadUrl = URL.createObjectURL(new Blob([ics], { type: "text/calendar;charset=utf-8" }));
+        document.getElementById("download").href = downloadUrl;
+        document.getElementById("summary").textContent = "Found " + data.entries.length + " birthday" +
+          (data.entries.length === 1 ? "" : "s") + " in " + file.name + ".";
+        var tbody = document.getElementById("preview");
+        tbody.textContent = "";
+        data.entries.forEach(function (e) {
+          var ev = buildEvent(e, "");
+          var tr = document.createElement("tr");
+          [e.name + " birthday", ev.shown + " (yearly)", ev.note].forEach(function (text) {
+            var td = document.createElement("td");
+            td.textContent = text;
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+        var skippedList = document.getElementById("skipped");
+        skippedList.textContent = "";
+        data.skipped.forEach(function (s) {
+          var li = document.createElement("li");
+          li.textContent = s.name + ": " + s.raw;
+          skippedList.appendChild(li);
+        });
+        document.getElementById("skipped-wrap").hidden = !data.skipped.length;
+        result.hidden = false;
+      }).catch(function (err) {
+        showError(err.message || String(err));
+      });
+    }
+
+    input.addEventListener("change", function () { handleFile(input.files[0]); input.value = ""; });
+    ["dragenter", "dragover"].forEach(function (type) {
+      drop.addEventListener(type, function (e) { e.preventDefault(); drop.classList.add("over"); });
+    });
+    ["dragleave", "drop"].forEach(function (type) {
+      drop.addEventListener(type, function (e) { e.preventDefault(); drop.classList.remove("over"); });
+    });
+    drop.addEventListener("drop", function (e) { handleFile(e.dataTransfer.files[0]); });
+  })();
+}
+</script>
+</body>
+</html>
