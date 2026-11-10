@@ -1,7 +1,7 @@
 # proton-birthday-calendar-adapter
 Import your Google/Outlook contacts to make a Proton birthday calendar
 
-**Use it here: https://fulldecent.github.io/proton-birthday-calendar-adapter/**
+**Use it here: <https://fulldecent.github.io/proton-birthday-calendar-adapter/>**
 
 ## How it works
 
@@ -16,3 +16,7 @@ Everything runs locally in your browser in a single self-contained [`index.html`
 ## Publishing
 
 The [Deploy to GitHub Pages](.github/workflows/pages.yml) workflow publishes `index.html` on every push to `main`. If Pages is not yet enabled, go to Settings → Pages and set **Source** to **GitHub Actions**.
+
+## References
+
+1. This project is built based on [best practices documented in github-pages-template](https://github.com/fulldecent/github-pages-template), commit 7f01f52a68a7480c4df8841be7fc2614d60ca930. The lint workflow is that commit's .github/workflows/lint.yml. Jekyll build scripts from the template are omitted.
